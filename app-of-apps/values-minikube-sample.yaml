@@ -10,13 +10,13 @@ helmCharts:
     enabled: true
 
   kube-prometheus-stack:
-    enabled: true
+    enabled: false
 
   loki:
-    enabled: true
+    enabled: false
 
   promtail:
-    enabled: true
+    enabled: false
 
   cloudnative-pg:
     enabled: true
@@ -25,18 +25,18 @@ helmCharts:
     enabled: true
 
   backstage:
-    enabled: true
+    enabled: false
 
   pgadmin:
     enabled: true
 
   sealed-secrets:
-    enabled: true
+    enabled: false
 
   # Microservice helm charts for the dev environment
 
   todolist-frontend-dev:
-    enabled: true
+    enabled: false
     values: minikube-sample/microservices/dev/todolist/frontend/values.yaml
 
   show-env-dev:
