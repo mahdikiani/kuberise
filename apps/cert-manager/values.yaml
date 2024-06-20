@@ -1,0 +1,20 @@
+cert-manager:
+  installCRDs: true
+  namespace: cert-manager
+
+selfSignedCertificate:
+  enabled: false
+
+letsencryptStagingCertificate:
+  enabled: false
+
+letsencryptProductionCertificate:
+  enabled: false
+
+# list of namespaces to create the certificate
+namespaces: []
+
+# certificate configuration
+certificate: {}
+
+email: user@kuberise.com

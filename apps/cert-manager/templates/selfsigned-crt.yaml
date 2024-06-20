@@ -1,0 +1,39 @@
+{{- if .Values.selfSignedCertificate.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ca-certificate
+spec:
+  commonName: ca.kuberise.local
+  isCA: true
+  issuerRef:
+    name: selfsigned-issuer
+    kind: Issuer
+  secretName: ca-key-pair
+  duration: 24000h # 1000 days
+  renewBefore: 360h # 15 days
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ca-clusterissuer
+spec:
+  ca:
+    secretName: ca-key-pair
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ca-clusterissuer-external
+spec:
+  ca:
+    secretName: ca-key-pair-external
+---
+{{- end }}

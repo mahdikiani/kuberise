@@ -39,6 +39,49 @@ function label_secret() {
   kubectl label secret "$secret_name" "$label" --context "$context" -n "$namespace"
 }
 
+generate_ca_cert_and_key() {
+
+  local context=$1
+  local platform_name=$2
+  local namespace=$3
+
+  # Validate platform_name is provided
+  if [ -z "$platform_name" ]; then
+    echo "platform_name is required as an input parameter."
+    return 1
+  fi
+
+  # Define the directory and file paths
+  DIR=".env/$platform_name"
+  CERT="$DIR/ca.crt"
+  KEY="$DIR/ca.key"
+
+  # Check if both the certificate and key files exist
+  if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+    echo "One or both of the CA certificate/key files do not exist. Generating..."
+
+    # Create the directory structure if it doesn't exist
+    mkdir -p "$DIR"
+
+    # Generate the CA certificate and private key
+    openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+      -keyout "$KEY" -out "$CERT" -subj "/CN=ca.kuberise.io CA/O=KUBERISE/C=NL"
+
+    echo "CA certificate and key generated."
+  else
+    echo "CA certificate and key already exist."
+  fi
+
+  # Create a secret in the cert-manager namespace with the CA certificate
+  kubectl create secret tls ca-key-pair-external \
+    --cert="$CERT" \
+    --key="$KEY" \
+    --namespace="$namespace" \
+    --dry-run=client -o yaml | kubectl apply --namespace="$namespace" --context="$context" -f -
+
+  echo "Secret with CA certificate and key created in the $namespace namespace."
+}
+
 function install_argocd() {
   local context=$1
   local namespace=$2
@@ -46,7 +89,7 @@ function install_argocd() {
   local admin_password=$4
   echo "Installing ArgoCD using Helm..."
   BCRYPT_HASH=$(htpasswd -nbBC 10 "" "$admin_password" | tr -d ':\n' | sed 's/$2y/$2a/')
-  helm upgrade --install --kube-context "$context" -n "$namespace" -f "$values_file" argocd argocd/argo-cd --version 6.9.2 --wait --set configs.secret.argocdServerAdminPassword="$BCRYPT_HASH"
+  helm upgrade --install --kube-context "$context" --wait --atomic -n "$namespace" --create-namespace  -f "$values_file" --version 6.9.2 --set configs.secret.argocdServerAdminPassword="$BCRYPT_HASH" --repo https://argoproj.github.io/argo-helm argocd argo-cd > /dev/null
 }
 
 function deploy_app_of_apps() {
@@ -123,16 +166,19 @@ EOF
 }
 
 # Variables Initialization
-# example: ./scripts/install.sh enterprise minikube https://github.com/kuberise/kuberise-enterprise.git main $GITHUB_TOKEN
+# example: ./scripts/install.sh minikube local https://github.com/kuberise/kuberise.git main $GITHUB_TOKEN
 
 CONTEXT=${1:-}                                          # example: platform-cluster
 PLATFORM_NAME=${2:-local}                               # example: local, dta, azure etc. (default: local)
-REPO_URL=${3:-}                                         # example: https://github.com/kuberise/kuberise-enterprise.git
+REPO_URL=${3:-}                                         # example: https://github.com/kuberise/kuberise.git
 TARGET_REVISION=${4:-HEAD}                              # example: HEAD, main, master, v1.0.0, release
 REPOSITORY_TOKEN=${5:-}
 
-ADMIN_PASSWORD=${ADMIN_PASSWORD:-}                      #TODO: generate random password or use a fixed one
-PG_SUPERUSER_PASSWORD=${PG_SUPERUSER_PASSWORD:-}        #TODO: generate random password or use a fixed one
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+PG_SUPERUSER_PASSWORD=${PG_SUPERUSER_PASSWORD:-superpassword}
+# Generate random password for PG_APP_PASSWORD which is database password used by the platform services
+PG_APP_USERNAME=application
+PG_APP_PASSWORD=${PG_APP_PASSWORD:-apppassword}
 
 if [ -z "$REPO_URL" ]; then
     echo "REPO_URL is undefined" 1>&2
@@ -154,19 +200,42 @@ if [ -z "$ADMIN_PASSWORD" ]; then
   exit 1
 fi
 
-check_required_tools
-
 # Namespace Definitions
 NAMESPACE_ARGOCD="argocd"
 NAMESPACE_CNPG="cloudnative-pg"
 NAMESPACE_KEYCLOAK="keycloak"
 NAMESPACE_BACKSTAGE="backstage"
+NAMESPACE_MONITORING="monitoring"
+NAMESPACE_CERTMANAGER="cert-manager"
+
+# Warning Message
+echo "WARNING: This script will install the platform '$PLATFORM_NAME' in the Kubernetes context '$CONTEXT'. The following namespaces and applications will be installed:"
+echo "- Namespace: $NAMESPACE_ARGOCD"
+echo "- Namespace: $NAMESPACE_CNPG"
+echo "- Namespace: $NAMESPACE_KEYCLOAK"
+echo "- Namespace: $NAMESPACE_BACKSTAGE"
+echo "- Namespace: $NAMESPACE_MONITORING"
+echo "- Namespace: $NAMESPACE_CERTMANAGER"
+echo "- Application: argocd-server"
+echo "- Application: app-of-apps-$PLATFORM_NAME"
+echo "Please confirm that you want to proceed by typing 'yes':"
+
+read confirmation
+if [ "$confirmation" != "yes" ]; then
+  echo "Installation aborted."
+  exit 0
+fi
+
+check_required_tools
+
 
 # Create Namespaces
 create_namespace "$CONTEXT" "$NAMESPACE_ARGOCD"
 create_namespace "$CONTEXT" "$NAMESPACE_CNPG"
 create_namespace "$CONTEXT" "$NAMESPACE_KEYCLOAK"
 create_namespace "$CONTEXT" "$NAMESPACE_BACKSTAGE"
+create_namespace "$CONTEXT" "$NAMESPACE_MONITORING"
+create_namespace "$CONTEXT" "$NAMESPACE_CERTMANAGER"
 
 # Create Secrets if TOKEN is provided
 if [ -n "${REPOSITORY_TOKEN}" ]; then
@@ -179,13 +248,17 @@ if [ -n "${REPOSITORY_TOKEN}" ]; then
   # TODO: Or get a list of teams and their repositories and create repo secret and project for each of them in a loop
 fi
 
+generate_ca_cert_and_key "$CONTEXT" "$PLATFORM_NAME" "$NAMESPACE_CERTMANAGER"
+
 # Secrets for PostgreSQL
-create_secret "$CONTEXT" "$NAMESPACE_CNPG" "cnpg-database-app" "--from-literal=dbname=app --from-literal=host=cnpg-database-rw --from-literal=username=app --from-literal=user=app --from-literal=port=5432 --from-literal=password=$ADMIN_PASSWORD --type=kubernetes.io/basic-auth"
+create_secret "$CONTEXT" "$NAMESPACE_CNPG" "cnpg-database-app" "--from-literal=dbname=app --from-literal=host=cnpg-database-rw --from-literal=username=$PG_APP_USERNAME --from-literal=user=$PG_APP_USERNAME --from-literal=port=5432 --from-literal=password=$PG_APP_PASSWORD --type=kubernetes.io/basic-auth"
 create_secret "$CONTEXT" "$NAMESPACE_CNPG" "cnpg-database-superuser" "--from-literal=dbname=* --from-literal=host=cnpg-database-rw --from-literal=username=postgres --from-literal=user=postgres --from-literal=port=5432 --from-literal=password=$PG_SUPERUSER_PASSWORD --type=kubernetes.io/basic-auth"
 
-# Keycloak and Backstage secrets
-create_secret "$CONTEXT" "$NAMESPACE_KEYCLOAK" "pg-secret" "--from-literal=password=$ADMIN_PASSWORD"
-create_secret "$CONTEXT" "$NAMESPACE_BACKSTAGE" "pg-secret" "--from-literal=password=$ADMIN_PASSWORD"
+# Keycloak and Backstage and Grafana secrets
+create_secret "$CONTEXT" "$NAMESPACE_KEYCLOAK" "pg-secret" "--from-literal=KC_DB_USERNAME=$PG_APP_USERNAME --from-literal=KC_DB_PASSWORD=$PG_APP_PASSWORD"
+create_secret "$CONTEXT" "$NAMESPACE_KEYCLOAK" "admin-secret" "--from-literal=KEYCLOAK_ADMIN=admin --from-literal=KEYCLOAK_ADMIN_PASSWORD=$ADMIN_PASSWORD"
+create_secret "$CONTEXT" "$NAMESPACE_BACKSTAGE" "pg-secret" "--from-literal=password=$PG_APP_PASSWORD"
+create_secret "$CONTEXT" "$NAMESPACE_MONITORING" "grafana-admin" "--from-literal=admin-user=admin --from-literal=admin-password=$ADMIN_PASSWORD --from-literal=ldap-toml="
 
 # Install ArgoCD with custom values and admin password
 VALUES_FILE="values/$PLATFORM_NAME/argocd/values.yaml"
